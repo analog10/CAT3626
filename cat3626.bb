@@ -13,7 +13,7 @@ inherit module
 
 do_compile () {
         unset CFLAGS CPPFLAGS CXXFLAGS LDFLAGS CC LD CPP
-        oe_runmake 'MODPATH={D}${base_libdir}/modules/${KERNEL_VERSION}/kernel/drivers/net' \
+        oe_runmake 'MODPATH={D}${base_libdir}/modules/${KERNEL_VERSION}/kernel/drivers/' \
                    'KERNEL_SOURCE=${STAGING_KERNEL_DIR}' \
                    'KDIR=${STAGING_KERNEL_DIR}' \
                    'KERNEL_VERSION=${KERNEL_VERSION}' \
@@ -22,6 +22,6 @@ do_compile () {
 }
 
 do_install() {
-        install -d ${D}${base_libdir}/modules/${KERNEL_VERSION}/kernel/drivers/net
-        install -m 0644 ${S}/cat3626*${KERNEL_OBJECT_SUFFIX} ${D}${base_libdir}/modules/${KERNEL_VERSION}/kernel/drivers/net
+        install -d ${D}${base_libdir}/modules/${KERNEL_VERSION}/kernel/drivers/
+        install -m 0644 ${S}/cat3626*${KERNEL_OBJECT_SUFFIX} ${D}${base_libdir}/modules/${KERNEL_VERSION}/kernel/drivers/
 }
