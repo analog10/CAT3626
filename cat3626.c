@@ -1,271 +1,252 @@
 /*
-	cat3626.c - high efficiency 1x/1.5x fractional charge pump with 
-		programmable dimming current in six LED channels
-	Doug Szumski  <d.s.szumski@gmail.com>  2010-03-29
-	based on ds1621.c by Christian W. Zuckschwerdt  <zany@triq.net>
-      
-	This program is free software; you can redistribute it and/or modify
-	it under the terms of the GNU General Public License as published by
-	the Free Software Foundation; either version 2 of the License, or
-	(at your option) any later version.
-  
-	This program is distributed in the hope that it will be useful,
-	but WITHOUT ANY WARRANTY; without even the implied warranty of
-	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-	GNU General Public License for more details.
-  
-	You should have received a copy of the GNU General Public License
-	along with this program; if not, write to the Free Software
-	Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ * cat3626.c - 16-bit Led dimmer
+ *
+ * Copyright (C) 2011 Jan Weitzel
+ * Copyright (C) 2008 Riku Voipio
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; version 2 of the License.
+ *
+ * Datasheet: http://www.nxp.com/documents/data_sheet/CAT3626.pdf
+ *
  */
 
 #include <linux/module.h>
-#include <linux/init.h>
-#include <linux/slab.h>
-#include <linux/jiffies.h>
 #include <linux/i2c.h>
-#include <linux/hwmon.h>
-#include <linux/hwmon-sysfs.h>
-#include <linux/err.h>
+#include <linux/slab.h>
+#include <linux/leds.h>
 #include <linux/mutex.h>
-#include <linux/sysfs.h>
+#include <linux/workqueue.h>
 
-/* The CAT3626 can only exist at 0x66 */
-static const unsigned short normal_i2c[] = { 0x66, I2C_CLIENT_END };
+struct cat3626_led {
+	u8 id;
+	u8 i2c_reg;
+	struct i2c_client *client;
+	char *name;
+	struct led_classdev ldev;
+	struct work_struct work;
 
-/* Insmod parameters */
-I2C_CLIENT_INSMOD_1(CAT3626);
+	/* Maximum current in microamps.
+	 * 0 disables the LED. */
+	int maximum_reg_value;
 
-/* CAT3626 level registers */
-static const u8 CAT3626_REG_LEVEL[3] = {
-	0x00,	 	/* CHANNEL A: RED   */
-	0x01,		/* CHANNEL B: GREEN */
-	0x02,		/* CHANNEL C: BLUE  */
+	/* Present current output. */
+	int present_reg_value;
+
+	/* The partner LED must have the same current. */
+	struct cat3626_led* partner;
 };
 
-/* CAT3626 channel enable data */
-static const u8 CAT3626_CHN_ENABLE[3] = {
-	0x02,	 	/* CHANNEL A2: RED   */
-	0x08,		/* CHANNEL B2: GREEN */
-	0x10,		/* CHANNEL C1: BLUE  */
+struct cat3626_platform_data {
+	struct cat3626_led leds[6];
 };
 
-/*CAT3626 output control register*/
-#define CAT3626_ENA		0x03
+/* m =  num_leds*/
 
-/*CAT3626 chip register settings */
-/*NOTE: this enables channels A2,B2 and C1*/
-#define CAT3626_ENA_CFG		0x1A
-#define CAT3626_DIS_CFG		0x00
+#define ADDR_REG_A 0
+#define ADDR_REG_B 1
+#define ADDR_REG_C 2
+#define ADDR_REGEN 3
 
-/*Constrain the maximum channel output to 20mA (limit of the LED)*/
-#define CAT3626_MAX_BRI		0x27
-#define CAT3626_MIN_BRI		0x00
+#define ldev_to_led(c)       container_of(c, struct cat3626_led, ldev)
 
-/*Level and channel data*/
-struct CAT3626_data {
-	struct device *hwmon_dev;
+struct cat3626_chip_info {
+	u8	num_leds;
+};
+
+struct cat3626_data {
+	struct i2c_client *client;
+	struct cat3626_led leds[6];
 	struct mutex update_lock;
-	u8 level[3];			/* level values, byte */
-	u8 channel[3];			/* channel values, byte, should be boolean */
-	
+	struct input_dev *idev;
+	struct work_struct work;
+
+	const struct cat3626_chip_info *chip_info;
 };
 
-static int CAT3626_write_level(struct i2c_client *client, u8 reg, u8 value)
+static int cat3626_probe(struct i2c_client *client,
+	const struct i2c_device_id *id);
+static int cat3626_remove(struct i2c_client *client);
+
+enum {
+	cat3626
+};
+
+static const struct i2c_device_id cat3626_id[] = {
+	{ "cat3626", cat3626 },
+	{ }
+};
+
+MODULE_DEVICE_TABLE(i2c, cat3626_id);
+
+static const struct cat3626_chip_info cat3626_chip_info_tbl[] = {
+	[cat3626] = {
+		.num_leds = 6,
+	}
+};
+
+static struct i2c_driver cat3626_driver = {
+	.driver = {
+		.name = "leds-cat3626",
+	},
+	.probe = cat3626_probe,
+	.remove = cat3626_remove,
+	.id_table = cat3626_id,
+};
+
+/* Set LED routing */
+static void cat3626_setled(struct cat3626_led *led)
 {
-	return i2c_smbus_write_byte_data(client, reg, value);
-}
+	struct i2c_client *client = led->client;
+	struct cat3626_data *data = i2c_get_clientdata(client);
+	char reg, toset;
 
-static void CAT3626_init_client(struct i2c_client *client)
-{
-	/*Turn all channels off on startup */
-	i2c_smbus_write_byte_data(client, CAT3626_ENA, CAT3626_DIS_CFG);
-}
-
-static ssize_t show_level(struct device *dev, struct device_attribute *da,
-			 char *buf)
-{
-	struct sensor_device_attribute *attr = to_sensor_dev_attr(da);
-	struct i2c_client *client = to_i2c_client(dev);
-	struct CAT3626_data *data = i2c_get_clientdata(client);
-	return sprintf(buf, "%d\n", data->level[attr->index]);
-}
-
-static ssize_t set_level(struct device *dev, struct device_attribute *da,
-			const char *buf, size_t count)
-{
-	struct sensor_device_attribute *attr = to_sensor_dev_attr(da);
-	struct i2c_client *client = to_i2c_client(dev);
-	struct CAT3626_data *data = i2c_get_clientdata(client);
-
-	/* Read the user level input and constrain to the LED capabilities */
-	u8 level_input = simple_strtol(buf, NULL, 10); 
-	u8 val = SENSORS_LIMIT(level_input, CAT3626_MIN_BRI, CAT3626_MAX_BRI);
-
-	/* Update the LED level */
 	mutex_lock(&data->update_lock);
-	data->level[attr->index] = val;
-	CAT3626_write_level(client, CAT3626_REG_LEVEL[attr->index],
-			  data->level[attr->index]);
-	mutex_unlock(&data->update_lock);
-	
-	return count;
-}
 
-static ssize_t set_channel(struct device *dev, struct device_attribute *da,
-			const char *buf, size_t count)
-{
-	struct sensor_device_attribute *attr = to_sensor_dev_attr(da);
-	struct i2c_client *client = to_i2c_client(dev);
-	struct CAT3626_data *data = i2c_get_clientdata(client);
-	u8 conf, new_conf;
+	/* Read the present register enable value. */
+	reg = i2c_smbus_read_byte_data(client, ADDR_REGEN);
+	toset = reg;
 
-	/* Read the user channel input and constrain to boolean (must be a better way?) */
-	u8 channel_input = simple_strtol(buf, NULL, 10); 
-	u8 val = SENSORS_LIMIT(channel_input, 0, 1);
+	/* Update based on desired LED setting. */
+	if(0 == led->present_reg_value){
+		toset &= ~(1 << led->id);
+	}
+	else{
+		toset |= 1 << led->id;
+	}
 
-	/* Update the LED channel */
-	mutex_lock(&data->update_lock);
-	
-	data->channel[attr->index] = val;
+	/* If the enable settings change, write the new register. */
+	if(toset != reg)
+		i2c_smbus_write_byte_data(client, ADDR_REGEN, toset);
 
-	new_conf = conf = i2c_smbus_read_byte_data(client, CAT3626_ENA);
-	
-	if (val == 0)
-		new_conf &= ~CAT3626_CHN_ENABLE[attr->index];
-	else if (val == 1)
-		new_conf |= CAT3626_CHN_ENABLE[attr->index];
-	
-	if (conf != new_conf)
-		CAT3626_write_level(client, CAT3626_ENA, new_conf);
+	/* If the LED has an nonzero brightness, set it on the device. */
+	if(led->present_reg_value > 0)
+		i2c_smbus_write_byte_data(client, led->i2c_reg, led->present_reg_value);
 
 	mutex_unlock(&data->update_lock);
-	
-	return count;
 }
 
-static ssize_t show_channel(struct device *dev, struct device_attribute *da,
-			 char *buf)
+static void cat3626_brightness_set(struct led_classdev *led_cdev,
+	enum led_brightness value)
 {
-	struct sensor_device_attribute *attr = to_sensor_dev_attr(da);
-	struct i2c_client *client = to_i2c_client(dev);
-	struct CAT3626_data *data = i2c_get_clientdata(client);
-	return sprintf(buf, "%d\n", data->channel[attr->index]);
+	struct cat3626_led *led = ldev_to_led(led_cdev);
+
+	/* remove lower 3 bits. */
+	value >>= 3;
+
+	if(value > 39)
+		value = 39;
+
+	led->present_reg_value = value;
+	schedule_work(&led->work);
 }
 
-
-static SENSOR_DEVICE_ATTR(red_level, S_IWUSR | S_IRUGO, show_level, set_level, 0);
-static SENSOR_DEVICE_ATTR(grn_level, S_IWUSR | S_IRUGO, show_level, set_level, 1);
-static SENSOR_DEVICE_ATTR(blu_level, S_IWUSR | S_IRUGO, show_level, set_level, 2);
-static SENSOR_DEVICE_ATTR(red_channel, S_IWUSR | S_IRUGO, show_channel, set_channel, 0);
-static SENSOR_DEVICE_ATTR(grn_channel, S_IWUSR | S_IRUGO, show_channel, set_channel, 1);
-static SENSOR_DEVICE_ATTR(blu_channel, S_IWUSR | S_IRUGO, show_channel, set_channel, 2);
-
-static struct attribute *CAT3626_attributes[] = {
-	&sensor_dev_attr_red_level.dev_attr.attr,
-	&sensor_dev_attr_grn_level.dev_attr.attr,
-	&sensor_dev_attr_blu_level.dev_attr.attr,
-	&sensor_dev_attr_red_channel.dev_attr.attr,
-	&sensor_dev_attr_grn_channel.dev_attr.attr,
-	&sensor_dev_attr_blu_channel.dev_attr.attr,
-	NULL
-};
-
-static const struct attribute_group CAT3626_group = {
-	.attrs = CAT3626_attributes,
-};
-
-static int CAT3626_detect(struct i2c_client *client, int kind,
-			 struct i2c_board_info *info)
+static void cat3626_led_work(struct work_struct *work)
 {
-	/*add a detection routine here - currently the chip is always found! */
-	strlcpy(info->type, "CAT3626", I2C_NAME_SIZE);
+	struct cat3626_led *led;
+	led = container_of(work, struct cat3626_led, work);
+	cat3626_setled(led);
+}
+
+static int cat3626_destroy_devices(struct cat3626_data *data, int n_devs)
+{
+	int i = n_devs;
+
+	if (!data)
+		return -EINVAL;
+
+	led_classdev_unregister(&data->leds[i].ldev);
+	cancel_work_sync(&data->leds[i].work);
+
 	return 0;
 }
 
-static int CAT3626_probe(struct i2c_client *client,
-			const struct i2c_device_id *id)
+static int cat3626_configure(struct i2c_client *client,
+	struct cat3626_data *data, struct cat3626_platform_data *pdata)
 {
-	struct CAT3626_data *data;
-	int err;
+	int i, err = 0;
 
-	data = kzalloc(sizeof(struct CAT3626_data), GFP_KERNEL);
-	if (!data) {
-		err = -ENOMEM;
-		goto exit;
+	/* Set the partner fields. */
+	for (i = 0; i < data->chip_info->num_leds; i += 2) {
+		data->leds[i].partner = data->leds + i + 1;
+		data->leds[i + 1].partner = data->leds + i;
+		data->leds[i].i2c_reg = i >> 1;
+		data->leds[i + 1].i2c_reg = i >> 1;
 	}
 
-	i2c_set_clientdata(client, data);
-	mutex_init(&data->update_lock);
+	for (i = 0; i < data->chip_info->num_leds; i++) {
+		struct cat3626_led *led = &data->leds[i];
+		struct cat3626_led *pled = &pdata->leds[i];
+		led->client = client;
+		led->id = i;
 
-	/* Initialize the CAT3626 chip */
-	CAT3626_init_client(client);
-
-	/* Register sysfs hooks */
-	if ((err = sysfs_create_group(&client->dev.kobj, &CAT3626_group)))
-		goto exit_free;
-
-	data->hwmon_dev = hwmon_device_register(&client->dev);
-	if (IS_ERR(data->hwmon_dev)) {
-		err = PTR_ERR(data->hwmon_dev);
-		goto exit_remove_files;
+		led->name = pled->name;
+		led->ldev.name = led->name;
+		led->ldev.brightness = LED_OFF;
+		/* 20ma max */
+		led->ldev.max_brightness = (39 << 3);
+		led->ldev.brightness_set = cat3626_brightness_set;
+		INIT_WORK(&led->work, cat3626_led_work);
+		err = led_classdev_register(&client->dev, &led->ldev);
+		if (err < 0) {
+			dev_err(&client->dev,
+				"couldn't register LED %s\n",
+				led->name);
+			goto exit;
+		}
+		cat3626_setled(led);
 	}
 
 	return 0;
 
-      exit_remove_files:
-	sysfs_remove_group(&client->dev.kobj, &CAT3626_group);
-      exit_free:
-	kfree(data);
-      exit:
+exit:
+	cat3626_destroy_devices(data, i);
 	return err;
 }
 
-static int CAT3626_remove(struct i2c_client *client)
+static int cat3626_probe(struct i2c_client *client,
+	const struct i2c_device_id *id)
 {
-	struct CAT3626_data *data = i2c_get_clientdata(client);
+	struct cat3626_data *data = i2c_get_clientdata(client);
+	struct cat3626_platform_data *cat3626_pdata =
+			dev_get_platdata(&client->dev);
 
-	hwmon_device_unregister(data->hwmon_dev);
-	sysfs_remove_group(&client->dev.kobj, &CAT3626_group);
+	if (!cat3626_pdata)
+		return -EIO;
 
-	kfree(data);
+	if (!i2c_check_functionality(client->adapter,
+		I2C_FUNC_SMBUS_BYTE_DATA))
+		return -EIO;
+
+	data = devm_kzalloc(&client->dev, sizeof(*data), GFP_KERNEL);
+	if (!data)
+		return -ENOMEM;
+
+	data->chip_info = &cat3626_chip_info_tbl[id->driver_data];
+
+	dev_info(&client->dev, "setting platform data\n");
+	i2c_set_clientdata(client, data);
+	data->client = client;
+	mutex_init(&data->update_lock);
+
+	return cat3626_configure(client, data, cat3626_pdata);
+}
+
+static int cat3626_remove(struct i2c_client *client)
+{
+	struct cat3626_data *data = i2c_get_clientdata(client);
+	int err;
+
+	err = cat3626_destroy_devices(data, data->chip_info->num_leds);
+	if (err)
+		return err;
 
 	return 0;
 }
 
-static const struct i2c_device_id CAT3626_id[] = {
-	{ "CAT3626", CAT3626 },
-	{ }
-};
-MODULE_DEVICE_TABLE(i2c, CAT3626_id);
+module_i2c_driver(cat3626_driver);
 
-/* This is the driver that will be inserted */
-static struct i2c_driver CAT3626_driver = {
-	.class		= I2C_CLASS_HWMON,
-	.driver = {
-		.name	= "CAT3626",
-	},
-	.probe		= CAT3626_probe,
-	.remove		= CAT3626_remove,
-	.id_table	= CAT3626_id,
-	.detect		= CAT3626_detect,
-	.address_data	= &addr_data,
-};
-
-static int __init CAT3626_init(void)
-{
-	return i2c_add_driver(&CAT3626_driver);
-}
-
-static void __exit CAT3626_exit(void)
-{
-	i2c_del_driver(&CAT3626_driver);
-}
-
-
-MODULE_AUTHOR("Doug Szumski <d.s.szumski@gmail.com>");
-MODULE_DESCRIPTION("CAT3626 RGB LED driver");
+MODULE_AUTHOR("David Bender");
 MODULE_LICENSE("GPL");
-
-module_init(CAT3626_init);
-module_exit(CAT3626_exit);
+MODULE_DESCRIPTION("CAT3626 LED Driver");
