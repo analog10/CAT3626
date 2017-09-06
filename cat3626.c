@@ -42,6 +42,39 @@ struct cat3626_platform_data {
 	struct cat3626_led leds[6];
 };
 
+static const struct cat3626_platform_data sample_leds = {
+	.leds = {
+		{
+			.maximum_reg_value = 39 << 3
+			,.present_reg_value = 0
+		}
+		,{
+			.maximum_reg_value = 39 << 3
+			,.present_reg_value = 0
+		}
+		,{
+			.maximum_reg_value = 39 << 3
+			,.present_reg_value = 0
+		}
+
+		,{
+			.maximum_reg_value = 39 << 3
+			,.present_reg_value = 0
+		}
+
+		,{
+			.maximum_reg_value = 39 << 3
+			,.present_reg_value = 0
+		}
+
+		,{
+			.maximum_reg_value = 39 << 3
+			,.present_reg_value = 0
+		}
+	}
+};
+
+
 /* m =  num_leds*/
 
 #define ADDR_REG_A 0
@@ -163,7 +196,7 @@ static int cat3626_destroy_devices(struct cat3626_data *data, int n_devs)
 }
 
 static int cat3626_configure(struct i2c_client *client,
-	struct cat3626_data *data, struct cat3626_platform_data *pdata)
+	struct cat3626_data *data, const struct cat3626_platform_data *pdata)
 {
 	int i, err = 0;
 
@@ -177,7 +210,7 @@ static int cat3626_configure(struct i2c_client *client,
 
 	for (i = 0; i < data->chip_info->num_leds; i++) {
 		struct cat3626_led *led = &data->leds[i];
-		struct cat3626_led *pled = &pdata->leds[i];
+		const struct cat3626_led *pled = &pdata->leds[i];
 		led->client = client;
 		led->id = i;
 
@@ -185,7 +218,7 @@ static int cat3626_configure(struct i2c_client *client,
 		led->ldev.name = led->name;
 		led->ldev.brightness = LED_OFF;
 		/* 20ma max */
-		led->ldev.max_brightness = (39 << 3);
+		led->ldev.max_brightness = (pled->maximum_reg_value);
 		led->ldev.brightness_set = cat3626_brightness_set;
 		INIT_WORK(&led->work, cat3626_led_work);
 		err = led_classdev_register(&client->dev, &led->ldev);
@@ -209,8 +242,7 @@ static int cat3626_probe(struct i2c_client *client,
 	const struct i2c_device_id *id)
 {
 	struct cat3626_data *data = i2c_get_clientdata(client);
-	struct cat3626_platform_data *cat3626_pdata =
-			dev_get_platdata(&client->dev);
+	const struct cat3626_platform_data *cat3626_pdata = &sample_leds;
 
 	if (!cat3626_pdata)
 		return -EIO;
