@@ -45,30 +45,36 @@ struct cat3626_platform_data {
 static const struct cat3626_platform_data sample_leds = {
 	.leds = {
 		{
-			.maximum_reg_value = 39 << 3
+			.name = "A0"
+			,.maximum_reg_value = 39 << 3
 			,.present_reg_value = 0
 		}
 		,{
-			.maximum_reg_value = 39 << 3
+			.name = "A1"
+			,.maximum_reg_value = 39 << 3
 			,.present_reg_value = 0
 		}
 		,{
-			.maximum_reg_value = 39 << 3
-			,.present_reg_value = 0
-		}
-
-		,{
-			.maximum_reg_value = 39 << 3
-			,.present_reg_value = 0
-		}
-
-		,{
-			.maximum_reg_value = 39 << 3
+			.name = "B0"
+			,.maximum_reg_value = 39 << 3
 			,.present_reg_value = 0
 		}
 
 		,{
-			.maximum_reg_value = 39 << 3
+			.name = "B1"
+			,.maximum_reg_value = 39 << 3
+			,.present_reg_value = 0
+		}
+
+		,{
+			.name = "C0"
+			,.maximum_reg_value = 39 << 3
+			,.present_reg_value = 0
+		}
+
+		,{
+			.name = "C1"
+			,.maximum_reg_value = 39 << 3
 			,.present_reg_value = 0
 		}
 	}
@@ -247,9 +253,11 @@ static int cat3626_probe(struct i2c_client *client,
 	if (!cat3626_pdata)
 		return -EIO;
 
+#if 0
 	if (!i2c_check_functionality(client->adapter,
 		I2C_FUNC_SMBUS_BYTE_DATA))
 		return -EIO;
+#endif
 
 	data = devm_kzalloc(&client->dev, sizeof(*data), GFP_KERNEL);
 	if (!data)
