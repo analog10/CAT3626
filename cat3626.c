@@ -27,11 +27,11 @@ struct cat3626_led {
 	struct led_classdev ldev;
 	struct work_struct work;
 
-	/* Maximum current in microamps.
-	 * 0 disables the LED. */
+	/* Maximum current in microamps. */
 	int maximum_reg_value;
 
-	/* Present current output. */
+	/* Present current output.
+	 * 0 disables the LED. */
 	int present_reg_value;
 
 	/* The partner LED must have the same current. */
@@ -46,35 +46,35 @@ static const struct cat3626_platform_data sample_leds = {
 	.leds = {
 		{
 			.name = "A0"
-			,.maximum_reg_value = 39 << 3
+			,.maximum_reg_value = 39 << 2
 			,.present_reg_value = 0
 		}
 		,{
 			.name = "A1"
-			,.maximum_reg_value = 39 << 3
+			,.maximum_reg_value = 39 << 2
 			,.present_reg_value = 0
 		}
 		,{
 			.name = "B0"
-			,.maximum_reg_value = 39 << 3
+			,.maximum_reg_value = 39 << 2
 			,.present_reg_value = 0
 		}
 
 		,{
 			.name = "B1"
-			,.maximum_reg_value = 39 << 3
+			,.maximum_reg_value = 39 << 2
 			,.present_reg_value = 0
 		}
 
 		,{
 			.name = "C0"
-			,.maximum_reg_value = 39 << 3
+			,.maximum_reg_value = 39 << 2
 			,.present_reg_value = 0
 		}
 
 		,{
 			.name = "C1"
-			,.maximum_reg_value = 39 << 3
+			,.maximum_reg_value = 39 << 2
 			,.present_reg_value = 0
 		}
 	}
@@ -135,16 +135,24 @@ static struct i2c_driver cat3626_driver = {
 };
 
 /* Set LED routing */
-static void cat3626_setled(struct cat3626_led *led)
+static int cat3626_setled(struct cat3626_led *led)
 {
 	struct i2c_client *client = led->client;
 	struct cat3626_data *data = i2c_get_clientdata(client);
 	char reg, toset;
+	s32 ret;
 
 	mutex_lock(&data->update_lock);
 
 	/* Read the present register enable value. */
-	reg = i2c_smbus_read_byte_data(client, ADDR_REGEN);
+	ret = i2c_smbus_read_byte_data(client, ADDR_REGEN);
+	if(ret < 0){
+		dev_err(&client->dev,
+			"couldn't read REGEN %s %i\n",
+			led->name, ret);
+		goto exit;
+	}
+	reg = ret;
 	toset = reg;
 
 	/* Update based on desired LED setting. */
@@ -156,14 +164,32 @@ static void cat3626_setled(struct cat3626_led *led)
 	}
 
 	/* If the enable settings change, write the new register. */
-	if(toset != reg)
-		i2c_smbus_write_byte_data(client, ADDR_REGEN, toset);
+	if(toset != reg){
+		ret = i2c_smbus_write_byte_data(client, ADDR_REGEN, toset);
+		if(ret < 0){
+			dev_err(&client->dev,
+				"couldn't enable LED %s %i\n",
+				led->name, ret);
+			goto exit;
+		}
+	}
 
 	/* If the LED has an nonzero brightness, set it on the device. */
-	if(led->present_reg_value > 0)
-		i2c_smbus_write_byte_data(client, led->i2c_reg, led->present_reg_value);
+	if(led->present_reg_value > 0){
+		ret = i2c_smbus_write_byte_data(client, led->i2c_reg, led->present_reg_value);
+		if(ret < 0){
+			dev_err(&client->dev,
+				"couldn't set LED brightness %s %i\n",
+				led->name, ret);
+			goto exit;
+		}
+	}
 
+	ret = 0;
+
+exit:
 	mutex_unlock(&data->update_lock);
+	return ret;
 }
 
 static void cat3626_brightness_set(struct led_classdev *led_cdev,
@@ -171,11 +197,10 @@ static void cat3626_brightness_set(struct led_classdev *led_cdev,
 {
 	struct cat3626_led *led = ldev_to_led(led_cdev);
 
-	/* remove lower 3 bits. */
-	value >>= 3;
+	if(value > led->maximum_reg_value)
+		value = led->maximum_reg_value;
 
-	if(value > 39)
-		value = 39;
+	value >>= 2;
 
 	led->present_reg_value = value;
 	schedule_work(&led->work);
@@ -234,7 +259,8 @@ static int cat3626_configure(struct i2c_client *client,
 				led->name);
 			goto exit;
 		}
-		cat3626_setled(led);
+		if(cat3626_setled(led) < 0){
+		}
 	}
 
 	return 0;
@@ -253,11 +279,12 @@ static int cat3626_probe(struct i2c_client *client,
 	if (!cat3626_pdata)
 		return -EIO;
 
-#if 0
 	if (!i2c_check_functionality(client->adapter,
 		I2C_FUNC_SMBUS_BYTE_DATA))
+	{
+		dev_err(&client->dev, "i2c algorithm failed SMBUS BYTE check\n");
 		return -EIO;
-#endif
+	}
 
 	data = devm_kzalloc(&client->dev, sizeof(*data), GFP_KERNEL);
 	if (!data)
