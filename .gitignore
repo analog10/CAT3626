@@ -1,4 +1,10 @@
+modules.order
+Module.symvers
+.tmp_versions
+*.cmd
+*.mod.c
 *.o
+*.ko
 *.so
 *.gz
 *.tar
