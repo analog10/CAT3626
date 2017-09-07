@@ -215,13 +215,15 @@ static void cat3626_led_work(struct work_struct *work)
 
 static int cat3626_destroy_devices(struct cat3626_data *data, int n_devs)
 {
-	int i = n_devs;
+	int i;
 
 	if (!data)
 		return -EINVAL;
 
-	led_classdev_unregister(&data->leds[i].ldev);
-	cancel_work_sync(&data->leds[i].work);
+	for(i = 0; i < n_devs; ++i){
+		led_classdev_unregister(&data->leds[i].ldev);
+		cancel_work_sync(&data->leds[i].work);
+	}
 
 	return 0;
 }
@@ -246,6 +248,7 @@ static int cat3626_configure(struct i2c_client *client,
 		led->id = i;
 
 		led->name = pled->name;
+		led->maximum_reg_value = pled->maximum_reg_value;
 		led->ldev.name = led->name;
 		led->ldev.brightness = LED_OFF;
 		/* 20ma max */
